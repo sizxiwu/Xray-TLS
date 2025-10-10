@@ -31,5 +31,7 @@
 通过 SSH 连接到您的服务器，然后执行以下命令即可启动脚本。建议使用 `root` 用户登录后执行。
 
 #### 一键命令
-
+```bash
 [bash wget https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh && chmod +x xray-tls.sh && xray-tls.sh](https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh)
+```bash
+curl -O https://raw.githubusercontent.com/sizxiwu/Xray-TLS-/main/xray-tls.sh && chmod +x xray-tls.sh && ./xray-tls.sh
