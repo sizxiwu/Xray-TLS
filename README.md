@@ -32,4 +32,4 @@
 
 #### 一键命令
 
-bash wget https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh && chmod +x xray-tls.sh && xray-tls.sh
+[bash wget https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh && chmod +x xray-tls.sh && xray-tls.sh](https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh)
