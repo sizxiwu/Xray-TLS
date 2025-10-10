@@ -33,5 +33,3 @@
 #### 一键命令
 ```bash
 [bash wget https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh && chmod +x xray-tls.sh && xray-tls.sh](https://github.com/sizxiwu/Xray-TLS-/blob/main/install.sh)
-```bash
-curl -O https://raw.githubusercontent.com/sizxiwu/Xray-TLS-/main/xray-tls.sh && chmod +x xray-tls.sh && ./xray-tls.sh
