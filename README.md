@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Script Language](https://img.shields.io/badge/language-Shell-green.svg)](https://www.gnu.org/software/bash/)
 
-本项目是一个用于在 Debian/Ubuntu 服务器上自动化部署 Xray 节点的 Shell 脚本，配置方案为 **VMess + WebSocket + TLS**。脚本旨在简化繁琐的部署流程，通过交互式菜单，帮助用户一键完成安装或卸载。
+本项目是一个用于在 Linux 服务器上自动化部署 Xray 节点的 Shell 脚本，配置方案为 **VMess + WebSocket + TLS**。脚本旨在简化繁琐的部署流程，通过交互式菜单，帮助用户一键完成安装或卸载。
 
 ---
 
