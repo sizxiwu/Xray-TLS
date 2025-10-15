@@ -41,7 +41,7 @@
 
 #### 一键命令
 ```bash
-curl -O https://raw.githubusercontent.com/sizxiwu/Xray-TLS/main/install.sh && chmod +x install.sh && ./install.sh
+curl -O https://gh.llkk.cc/https://raw.githubusercontent.com/sizxiwu/Xray-TLS/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
 ---
