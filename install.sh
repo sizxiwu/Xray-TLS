@@ -61,8 +61,8 @@ install_xray() {
     echo "2) VLess"
     read -rp "请输入选项 [1-2]: " PROTO_CHOICE
     case $PROTO_CHOICE in
-        1) PROTOCOL="vmess" ;;
-        2) PROTOCOL="vless" ;;
+        1) PROTOCOL="vmess"; ;;
+        2) PROTOCOL="vless"; ;;
         *) echo "错误：无效选项"; exit 1;;
     esac
 
@@ -75,11 +75,9 @@ install_xray() {
     check_port 80
     check_port $XRAY_PORT
 
-    # 安装 acme.sh（使用正确的参数格式）
-    if ! curl -fsSL https://get.acme.sh | /bin/sh -s -- --force; then
-        echo "警告：acme.sh 安装失败，将尝试使用 certbot 回退。"
-    fi
-    chmod +x "$ACME_DIR/acme.sh" 2>/dev/null || true
+    # 安装 acme.sh
+    curl https://get.acme.sh | sh -s email=$EMAIL --force
+    chmod +x "$ACME_DIR/acme.sh"
 
     # 下载并安装 Xray
     if ! command -v xray >/dev/null 2>&1; then
@@ -153,29 +151,14 @@ EOF
     systemctl daemon-reload
     systemctl enable xray.service
 
-    # 申请证书并重启 Xray（优先 acme.sh，否则回退到 certbot）
-    if [ -x "$ACME_DIR/acme.sh" ]; then
-        "$ACME_DIR/acme.sh" --issue -d "$DOMAIN" --standalone --keylength ec-256 --force || true
-        "$ACME_DIR/acme.sh" --install-cert -d "$DOMAIN" \
-            --key-file "$SSL_DIR/$DOMAIN.key" \
-            --fullchain-file "$SSL_DIR/$DOMAIN.crt" \
-            --reloadcmd "systemctl restart xray" || true
-    fi
+    # 申请证书并重启 Xray
+    "$ACME_DIR/acme.sh" --issue -d "$DOMAIN" --standalone --keylength ec-256 --force
+    "$ACME_DIR/acme.sh" --install-cert -d "$DOMAIN" \
+        --key-file "$SSL_DIR/$DOMAIN.key" \
+        --fullchain-file "$SSL_DIR/$DOMAIN.crt" \
+        --reloadcmd "systemctl restart xray"
 
-    # 如果上面的 acme.sh 没成功（或未安装），尝试 certbot（并确保复制到 SSL_DIR）
-    if [ ! -f "$SSL_DIR/$DOMAIN.crt" ] || [ ! -f "$SSL_DIR/$DOMAIN.key" ]; then
-        if certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email "$EMAIL" --force-renewal; then
-            mkdir -p "$SSL_DIR"
-            cp -L "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$SSL_DIR/$DOMAIN.crt" || true
-            cp -L "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$SSL_DIR/$DOMAIN.key" || true
-            chmod 644 "$SSL_DIR/$DOMAIN.crt" || true
-            chmod 600 "$SSL_DIR/$DOMAIN.key" || true
-            systemctl restart xray.service || true
-        fi
-    else
-        # 如果 acme.sh 已放好证书，重启 xray 生效
-        systemctl restart xray.service || true
-    fi
+    systemctl restart xray.service
 
     # 输出客户端可导入链接
     if [ "$PROTOCOL" = "vless" ]; then
