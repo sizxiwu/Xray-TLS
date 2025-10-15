@@ -169,7 +169,8 @@ install_xray_binary() {
     fi
     local country
     country=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
-    country=$(echo -n "$country" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
+    country=$(echo -n "$country" | tr -d '
+' | tr '[:lower:]' '[:upper:]')
     local mirror_prefix=""
     [ "$country" = "CN" ] && mirror_prefix="https://gh.llkk.cc/https://"
     local relative_url="github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
