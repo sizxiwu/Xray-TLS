@@ -1,325 +1,217 @@
 #!/usr/bin/env bash
-# Xray 一键安装脚本 (支持 VMess/VLESS, TLS/HTTP 模式)
-# 要求: 以 root 用户运行，使用 acme.sh 独立模式申请证书
+# Xray 一键安装脚本 (支持 TCP+TLS / WS+TLS, VMess/VLess, 自动回退 HTTP)
+set -euo pipefail
 
-set -e
-
-# 彩色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # 无色
+NC='\033[0m'
 
-# 检查是否 root 用户
-if [[ "$EUID" -ne 0 ]]; then
-    echo -e "${RED}错误：请使用 root 用户运行此脚本！${NC}"
-    exit 1
-fi
+CONFIG_DIR="/usr/local/etc/xray"
+BIN_DIR="/usr/local/bin"
+LOG_DIR="/var/log/xray"
+SYSTEMD_SERVICE="/etc/systemd/system/xray.service"
+ACME_SH="$HOME/.acme.sh/acme.sh"
 
-# 生成随机 UUID
+mkdir -p "$CONFIG_DIR" "$LOG_DIR"
+
 gen_uuid() {
-    if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen
-    else
-        cat /proc/sys/kernel/random/uuid
+    command -v uuidgen >/dev/null 2>&1 && uuidgen || cat /proc/sys/kernel/random/uuid
+}
+
+install_xray_core() {
+    if ! command -v xray >/dev/null 2>&1; then
+        echo -e "${GREEN}安装 Xray 核心...${NC}"
+        bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 }
 
-# 安装 Xray 核心（使用官方安装脚本）
-install_xray() {
-    echo -e "${GREEN}正在安装 Xray...${NC}"
-    bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    echo -e "${GREEN}Xray 安装完成！${NC}"
+install_acme() {
+    if [ ! -f "$ACME_SH" ]; then
+        echo -e "${GREEN}安装 acme.sh...${NC}"
+        curl -sS https://get.acme.sh | sh
+        source ~/.bashrc || true
+    fi
 }
 
-# 配置目录和日志
-CONFIG_DIR="/usr/local/etc/xray"
-mkdir -p "$CONFIG_DIR"
-LOG_DIR="/var/log/xray"
-mkdir -p "$LOG_DIR"
-
-# 使用 acme.sh 申请证书
 issue_certificate() {
     local domain="$1"
-    # 安装 acme.sh（若未安装）
-    if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
-        curl -sS https://get.acme.sh | sh
-        source ~/.bashrc
-    fi
-    # 默认尝试 Let's Encrypt (ECC)
-    acme.sh --issue --standalone -d "$domain" --keylength ec-256 --force
+    local max_retries=5
+    local i
+    for i in $(seq 1 $max_retries); do
+        echo -e "${GREEN}尝试申请证书 (Let's Encrypt) 第 $i 次...${NC}"
+        if "$ACME_SH" --issue --standalone -d "$domain" --keylength ec-256 --force; then
+            return 0
+        fi
+        sleep 5
+    done
+    return 1
 }
 
 install_certificate() {
     local domain="$1"
-    local cert_dir="$CONFIG_DIR"
-    # 安装证书到指定路径
-    ~/.acme.sh/acme.sh --install-cert -d "$domain" \
-        --cert-file "$cert_dir/$domain.crt" \
-        --key-file  "$cert_dir/$domain.key" \
-        --fullchain-file "$cert_dir/$domain.fullchain.crt" \
-        --ecc --reloadcmd "systemctl restart xray"
+    "$ACME_SH" --install-cert -d "$domain" \
+        --cert-file "$CONFIG_DIR/$domain.crt" \
+        --key-file "$CONFIG_DIR/$domain.key" \
+        --fullchain-file "$CONFIG_DIR/$domain.fullchain.crt" \
+        --reloadcmd "systemctl restart xray"
 }
 
-# 生成 Xray 配置文件
 generate_config() {
-    local protocol="$1"  # vless 或 vmess
+    local protocol="$1"
     local uuid="$2"
     local port="$3"
     local domain="$4"
     local path="$5"
-    local tls_enabled="$6"  # yes/no
-    local cert_key_file cert_crt_file
-    if [ "$tls_enabled" == "yes" ]; then
-        cert_crt_file="$CONFIG_DIR/$domain.crt"
-        cert_key_file="$CONFIG_DIR/$domain.key"
-    fi
+    local net="$6"   # tcp / ws
+    local tls="$7"   # yes/no
 
-    # 日志路径配置
-    local log_access="$LOG_DIR/access.log"
-    local log_error="$LOG_DIR/error.log"
+    local cert_crt="$CONFIG_DIR/$domain.crt"
+    local cert_key="$CONFIG_DIR/$domain.key"
 
-    if [ "$protocol" == "vless" ]; then
-        cat > "$CONFIG_DIR/config.json" <<EOF
+    cat > "$CONFIG_DIR/config.json" <<EOF
 {
   "log": {
     "loglevel": "warning",
-    "access": "$log_access",
-    "error": "$log_error"
+    "access": "$LOG_DIR/access.log",
+    "error": "$LOG_DIR/error.log"
   },
   "inbounds": [
     {
       "port": $port,
-      "protocol": "vless",
+      "protocol": "$protocol",
       "settings": {
         "clients": [
           {
             "id": "$uuid",
-            "flow": "xtls-rprx-direct",
-            "email": "user"
+            "email": "user",
+            "alterId": 0
           }
         ],
-        "decryption": "none",
-        "fallbacks": []
+        "decryption": "none"
       },
       "streamSettings": {
-        "network": "ws",
-        "security": "$( [ "$tls_enabled" == "yes" ] && echo "tls" || echo "none" )",
-        $( [ "$tls_enabled" == "yes" ] && echo "\"tlsSettings\": { \"certificates\": [{ \"certificateFile\": \"$cert_crt_file\", \"keyFile\": \"$cert_key_file\" }] }," || echo "" )
-        "wsSettings": {
-          "path": "/$path",
-          "headers": {
-            "Host": "$domain"
-          }
-        }
+        "network": "$net",
+        $( [ "$tls" == "yes" ] && echo "\"security\":\"tls\"," || echo "\"security\":\"none\"," )
+        $( [ "$tls" == "yes" ] && echo "\"tlsSettings\":{\"certificates\":[{\"certificateFile\":\"$cert_crt\",\"keyFile\":\"$cert_key\"}]}," || echo "" )
+        $( [ "$net" == "ws" ] && echo "\"wsSettings\":{\"path\":\"/$path\",\"headers\":{\"Host\":\"$domain\"}}," || echo "" )
+        "tcpSettings": {}
       }
     }
   ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ]
+  "outbounds": [{"protocol":"freedom","settings":{}}]
 }
 EOF
-    else
-        # VMess 配置
-        cat > "$CONFIG_DIR/config.json" <<EOF
-{
-  "log": {
-    "loglevel": "warning",
-    "access": "$log_access",
-    "error": "$log_error"
-  },
-  "inbounds": [
-    {
-      "port": $port,
-      "protocol": "vmess",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "alterId": 0,
-            "email": "user"
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "ws",
-        "security": "$( [ "$tls_enabled" == "yes" ] && echo "tls" || echo "none" )",
-        $( [ "$tls_enabled" == "yes" ] && echo "\"tlsSettings\": { \"certificates\": [{ \"certificateFile\": \"$cert_crt_file\", \"keyFile\": \"$cert_key_file\" }] }," || echo "" )
-        "wsSettings": {
-          "path": "/$path",
-          "headers": {
-            "Host": "$domain"
-          }
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ]
-}
-EOF
-    fi
 }
 
-# 输出客户端配置链接
-print_links() {
+print_link() {
     local protocol="$1"
     local uuid="$2"
     local domain="$3"
     local port="$4"
     local path="$5"
-    local tls_enabled="$6"
-    local tls_param tls_flag
-    if [ "$tls_enabled" == "yes" ]; then
-        tls_param="tls"
-    else
-        tls_param="none"
-    fi
-    echo -e "${GREEN}配置完成！以下为客户端链接：${NC}"
+    local net="$6"
+    local tls="$7"
+
+    local tls_param
+    tls_param=$( [ "$tls" == "yes" ] && echo "tls" || echo "none" )
+
     if [ "$protocol" == "vless" ]; then
-        # VLESS 链接
-        # 注意：path 需要 URL 编码
-        local url_path
-        url_path=$(echo -n "/$path" | sed 's/\//%2F/g')
-        echo "  VLESS: vless://${uuid}@${domain}:${port}?encryption=none&security=${tls_param}&type=ws&host=${domain}&path=/${path}#xray"
+        echo -e "${GREEN}VLESS 链接:${NC}"
+        echo "vless://${uuid}@${domain}:${port}?encryption=none&security=${tls_param}&type=${net}&host=${domain}&path=/${path}#xray"
     else
-        # VMess 链接
-        local json="{\"v\":\"2\",\"ps\":\"Xray-VMess\",\"add\":\"$domain\",\"port\":\"$port\",\"id\":\"$uuid\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"\",\"path\":\"/$path\",\"tls\":\"${tls_param}\"}"
-        local vmess_link
-        vmess_link=$(echo -n "$json" | base64 | tr -d '\n')
-        echo "  VMess: vmess://${vmess_link}"
+        echo -e "${GREEN}VMess 链接:${NC}"
+        local json="{\"v\":\"2\",\"ps\":\"Xray\",\"add\":\"$domain\",\"port\":\"$port\",\"id\":\"$uuid\",\"aid\":0,\"net\":\"$net\",\"type\":\"none\",\"host\":\"$domain\",\"path\":\"/$path\",\"tls\":\"$tls_param\"}"
+        echo "vmess://$(echo -n "$json" | base64 | tr -d '\n')"
     fi
 }
 
-# 安装流程 (含 TLS 模式申请及回退)
 install_mode_tls() {
-    read -rp "请输入你的域名 (Host): " domain
-    if [ -z "$domain" ]; then
-        echo -e "${RED}错误：域名不能为空！${NC}"; return
-    fi
-    # 随机路径
-    path="xray"
-    read -rp "请选择协议 (1) VLESS  (2) VMess ：" choice_proto
-    case "$choice_proto" in
-        1) protocol="vless" ;;
-        2) protocol="vmess" ;;
-        *) echo -e "${RED}无效选项${NC}"; return ;;
-    esac
+    read -rp "请输入域名： " domain
+    [ -z "$domain" ] && echo -e "${RED}域名不能为空${NC}" && return
+
+    echo "选择协议: 1)VLESS 2)VMess"
+    read -rp "选择协议 [1-2]:" choice
+    case "$choice" in 1) protocol="vless";; 2) protocol="vmess";; *) echo "无效"; return;; esac
+
+    echo "选择传输方式: 1)TCP+TLS 2)WS+TLS"
+    read -rp "选择传输方式 [1-2]:" t_choice
+    case "$t_choice" in 1) net="tcp"; port=443; path="";; 2) net="ws"; port=443; path="xray";; *) echo "无效"; return;; esac
+
     uuid=$(gen_uuid)
-    port=443
-    echo -e "${GREEN}正在申请证书（可能需要几秒）...${NC}"
-    # 初次尝试 Let's Encrypt
+    install_acme
+
     if issue_certificate "$domain"; then
-        echo -e "${GREEN}Let's Encrypt 证书申请成功！${NC}"
+        echo -e "${GREEN}证书申请成功${NC}"
+        install_certificate "$domain"
+        generate_config "$protocol" "$uuid" "$port" "$domain" "$path" "$net" "yes"
+        systemctl enable xray
+        systemctl restart xray
+        print_link "$protocol" "$uuid" "$domain" "$port" "$path" "$net" "yes"
     else
-        echo -e "${YELLOW}Let's Encrypt 申请失败，尝试备用 CA (Buypass)...${NC}"
-        if ~/.acme.sh/acme.sh --issue --standalone -d "$domain" --server https://api.buypass.com/acme/directory --keylength ec-256 --force; then
-            echo -e "${GREEN}Buypass 证书申请成功！${NC}"
-        else
-            echo -e "${RED}备用 CA 申请失败，切换至 HTTP 模式！${NC}"
-            install_mode_http  # 回退到 HTTP 模式
-            return
-        fi
+        echo -e "${YELLOW}证书申请失败，回退 HTTP 模式${NC}"
+        install_mode_http
     fi
-    # 安装证书
-    install_certificate "$domain"
-    # 生成配置并启动 Xray
-    generate_config "$protocol" "$uuid" "$port" "$domain" "$path" "yes"
-    systemctl enable xray
-    systemctl restart xray
-    # 输出链接
-    print_links "$protocol" "$uuid" "$domain" "$port" "$path" "yes"
 }
 
-# 安装流程 (HTTP 模式，无 TLS)
 install_mode_http() {
-    read -rp "请输入你的域名 (Host)： " domain
-    [ -z "$domain" ] && echo -e "${RED}错误：域名不能为空！${NC}" && return
-    read -rp "请选择协议 (1) VLESS  (2) VMess ：" choice_proto
-    case "$choice_proto" in
-        1) protocol="vless" ;;
-        2) protocol="vmess" ;;
-        *) echo -e "${RED}无效选项${NC}"; return ;;
-    esac
+    read -rp "请输入域名或 IP： " domain
+    [ -z "$domain" ] && echo -e "${RED}不能为空${NC}" && return
+    echo "选择协议: 1)VLESS 2)VMess"
+    read -rp "选择协议 [1-2]:" choice
+    case "$choice" in 1) protocol="vless";; 2) protocol="vmess";; *) echo "无效"; return;; esac
+    echo "选择传输方式: 1)TCP 2)WS"
+    read -rp "选择传输方式 [1-2]:" t_choice
+    case "$t_choice" in 1) net="tcp"; port=80; path="";; 2) net="ws"; port=80; path="xray";; *) echo "无效"; return;; esac
+
     uuid=$(gen_uuid)
-    port=80
-    path="xray"
-    # 直接生成 HTTP 配置并启动
-    generate_config "$protocol" "$uuid" "$port" "$domain" "$path" "no"
+    generate_config "$protocol" "$uuid" "$port" "$domain" "$path" "$net" "no"
     systemctl enable xray
     systemctl restart xray
-    print_links "$protocol" "$uuid" "$domain" "$port" "$path" "no"
+    print_link "$protocol" "$uuid" "$domain" "$port" "$path" "$net" "no"
 }
 
-# 卸载 Xray
 uninstall_xray() {
-    read -rp "确认卸载 Xray？(y/n)： " yn
+    read -rp "确认卸载 Xray？(y/n): " yn
     case "$yn" in
-        [Yy]* )
-            echo -e "${GREEN}正在卸载 Xray...${NC}"
+        [Yy]*) 
             systemctl stop xray || true
             systemctl disable xray || true
-            rm -f /etc/systemd/system/xray.service
-            rm -f /etc/systemd/system/xray@.service
-            rm -f /usr/local/bin/xray
-            rm -rf /usr/local/etc/xray
-            rm -rf /usr/local/share/xray
-            rm -rf "$LOG_DIR"
+            rm -f "$BIN_DIR/xray" "$SYSTEMD_SERVICE"
+            rm -rf "$CONFIG_DIR" "$LOG_DIR" "$HOME/.acme.sh"
             systemctl daemon-reload
-            echo -e "${GREEN}Xray 已卸载完成！${NC}"
-            ;;
-        * ) echo "已取消卸载。";;
+            echo -e "${GREEN}卸载完成${NC}";;
+        *) echo "取消";;
     esac
 }
 
-# 重启 Xray 服务
 restart_xray() {
-    if systemctl is-active --quiet xray; then
-        systemctl restart xray
-        echo -e "${GREEN}Xray 服务已重启！${NC}"
-    else
-        echo -e "${YELLOW}Xray 服务未安装或未运行。${NC}"
-    fi
+    systemctl restart xray && echo -e "${GREEN}重启完成${NC}"
 }
 
-# 查看日志
 view_logs() {
-    if [ ! -f "$LOG_DIR/access.log" ] && [ ! -f "$LOG_DIR/error.log" ]; then
-        echo -e "${YELLOW}日志文件不存在，请先安装并运行 Xray。${NC}"
-        return
-    fi
-    echo -e "${GREEN}=== Access Log (最新 20 行) ===${NC}"
-    tail -n 20 "$LOG_DIR/access.log"
-    echo -e "${GREEN}=== Error Log (最新 20 行) ===${NC}"
-    tail -n 20 "$LOG_DIR/error.log"
+    [ -f "$LOG_DIR/access.log" ] && tail -n 20 "$LOG_DIR/access.log"
+    [ -f "$LOG_DIR/error.log" ] && tail -n 20 "$LOG_DIR/error.log"
 }
 
 # 主菜单
 while true; do
     echo
-    echo "===== Xray 一键安装脚本 ====="
-    echo "1) 安装 Xray (TLS 模式，含证书申请回退)"
-    echo "2) 安装 Xray (始终 HTTP 模式，无 TLS)"
+    echo "===== Xray 安装脚本 ====="
+    echo "1) 安装 Xray (TLS)"
+    echo "2) 安装 Xray (HTTP)"
     echo "3) 卸载 Xray"
-    echo "4) 重启 Xray 服务"
-    echo "5) 查看 Xray 日志"
+    echo "4) 重启 Xray"
+    echo "5) 查看日志"
     echo "6) 退出"
-    read -rp "请选择 [1-6]：" menu
+    read -rp "请选择 [1-6]:" menu
     case "$menu" in
-        1) install_xray; install_mode_tls ;;
-        2) install_xray; install_mode_http ;;
+        1) install_xray_core; install_mode_tls ;;
+        2) install_xray_core; install_mode_http ;;
         3) uninstall_xray ;;
         4) restart_xray ;;
         5) view_logs ;;
-        6) echo "退出脚本。"; exit 0 ;;
-        *) echo -e "${RED}无效选项！${NC}" ;;
+        6) exit 0 ;;
+        *) echo "无效选项";;
     esac
 done
