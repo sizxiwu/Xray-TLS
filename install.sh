@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =================================================================
-# Xray 一键安装脚本 (直达菜单版)
+# Xray 一键安装脚本 (vFinal - 直达菜单 & 完全自定义)
 #
 # 特性:
 # - VLess 协议: 仅支持 WebSocket + TLS (高兼容性)
 # - VMess 协议: 支持 WebSocket + TLS 和 TCP + TLS (HTTP 伪装)
+# - WebSocket 模式支持自定义伪装 Host
 # - 自动检测域名解析，等待生效
 # - 使用 acme.sh 自动申请和续签 SSL 证书
-# - 提供完整的安装、卸载、管理功能
 # =================================================================
 
 
@@ -17,9 +17,6 @@ set -euo pipefail
 # 配置参数
 # ========================
 XRAY_PORT=443
-# WebSocket (ws) 模式下伪装的 Host
-WS_HOST="yunpanlive.chinaunicomvideo.cn"
-# 按要求，使用 root 用户运行
 XRAY_USER="root"
 XRAY_BIN_DIR="/usr/local/bin"
 XRAY_CONFIG_DIR="/usr/local/etc/xray"
@@ -174,12 +171,14 @@ install_xray() {
 
     check_dns "$DOMAIN"
 
-    HTTP_PATH=""
-    HTTP_HOST_HEADER=""
-    HTTP_USER_AGENT=""
+    local HTTP_PATH=""
+    local WS_HOST=""
+    local HTTP_HOST_HEADER=""
+    local HTTP_USER_AGENT=""
 
     if [ "$TRANSPORT_NETWORK" = "ws" ]; then
         read -rp "请输入 WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
+        read -rp "请输入 WebSocket 伪装域名 (Host) [${DOMAIN}]: " -e -i "${DOMAIN}" WS_HOST
     else # tcp
         echo "--- 开始自定义 HTTP 伪装头 ---"
         read -rp "请输入 HTTP 伪装路径 [/]: " -e -i "/" HTTP_PATH
@@ -213,7 +212,7 @@ install_xray() {
     UUID=$(uuidgen)
     echo "生成 UUID: $UUID"
 
-    STREAM_SETTINGS_JSON=""
+    local STREAM_SETTINGS_JSON=""
     if [ "$TRANSPORT_NETWORK" = "ws" ]; then
         STREAM_SETTINGS_JSON=$(cat <<EOF
     "streamSettings": {
@@ -302,12 +301,12 @@ EOF
     fi
     echo "--------------------------------------------------"
 
-    CLIENT_LINK=""
+    local CLIENT_LINK=""
     if [ "$PROTOCOL" = "vless" ]; then
         # VLess 协议在此脚本中只生成 ws 链接
         CLIENT_LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?type=ws&host=${WS_HOST}&path=${HTTP_PATH}&security=tls&sni=${DOMAIN}&encryption=none#${DOMAIN}-vless-ws"
     else # vmess
-        VMESS_JSON=""
+        local VMESS_JSON=""
         local ps_name="${DOMAIN}-${TRANSPORT_NETWORK}"
         if [ "$TRANSPORT_NETWORK" = "ws" ]; then
             VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$WS_HOST" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
@@ -351,7 +350,7 @@ main() {
 
     clear
     echo "======================================================="
-    echo "  Xray 一键安装脚本 (直达菜单版)"
+    echo "  Xray 一键安装脚本 (直达菜单 & 完全自定义)"
     echo "======================================================="
     echo "--- 安装选项 ---"
     echo " 1) 安装 VLESS + WebSocket + TLS"
