@@ -8,8 +8,8 @@ set -euo pipefail
 # - 主菜单直接选择安装组合, 无需二次选择
 # - VLESS/VMess: 均支持 WebSocket+TLS 和 TCP+HTTP伪装
 # - VLESS+TCP 模式强制 ALPN 为 http/1.1
+# - WebSocket 模式支持自定义伪装 Host
 # - 自动流程: 智能检测域名, 自动管理证书
-# - 高度自定义: TCP模式支持自定义HTTP伪装头
 # =================================================================
 
 
@@ -17,7 +17,6 @@ set -euo pipefail
 # 配置参数
 # ========================
 XRAY_PORT=443
-WS_HOST="yunpanlive.chinaunicomvideo.cn"
 XRAY_USER="root"
 XRAY_BIN_DIR="/usr/local/bin"
 XRAY_CONFIG_DIR="/usr/local/etc/xray"
@@ -135,6 +134,7 @@ install_xray() {
     # --- 配置生成 ---
     UUID=$(uuidgen)
     HTTP_PATH=""
+    WS_HOST=""
     HTTP_HOST_HEADER=""
     HTTP_USER_AGENT=""
     STREAM_SETTINGS_JSON=""
@@ -148,6 +148,7 @@ install_xray() {
 
     if [ "$TRANSPORT_NETWORK" = "ws" ]; then
         read -rp "请输入 WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
+        read -rp "请输入 WebSocket 伪装域名 (Host) [${DOMAIN}]: " -e -i "${DOMAIN}" WS_HOST
         STREAM_SETTINGS_JSON=$(cat <<EOF
     "streamSettings": { "network": "ws", "security": "tls", "tlsSettings": { ${ALPN_JSON}, "certificates": [{"certificateFile": "${SSL_DIR}/${DOMAIN}.crt","keyFile": "${SSL_DIR}/${DOMAIN}.key"}], "serverName": "${DOMAIN}" }, "wsSettings": {"path": "${HTTP_PATH}","headers":{ "Host": "${WS_HOST}" }}}
 EOF
