@@ -105,32 +105,67 @@ issue_cert_acme() {
 
     # 尝试列表：默认（Let’s Encrypt），ZeroSSL，回退到 certbot
     while [ "$retries" -lt "$RETRY_LIMIT" ]; do
-        log "尝试使用 acme.sh 申请证书 (尝试 $((retries+1))/${RETRY_LIMIT}) 使用 Let\'s Encrypt)"
+        log "尝试使用 acme.sh 申请证书 (尝试 $((retries+1))/${RETRY_LIMIT}) 使用 Let's Encrypt)"
         if "$ACME_DIR/acme.sh" --issue -d "$domain" --standalone --accountemail "$email" --force --log >/tmp/acme_issue.log 2>&1; then
-            log "acme.sh (Let\'s Encrypt) 申请成功"
-            return 0
+            log "acme.sh (Let's Encrypt) 申请成功"
+            # 将证书安装到指定目录
+            mkdir -p "$SSL_DIR"
+            "$ACME_DIR/acme.sh" --install-cert -d "$domain" \
+                --key-file "$SSL_DIR/$domain.key" \
+                --fullchain-file "$SSL_DIR/$domain.crt" \
+                --reloadcmd "systemctl restart xray" >/tmp/acme_install.log 2>&1 || true
+            # 确认证书存在
+            if [ -s "$SSL_DIR/$domain.crt" ] && [ -s "$SSL_DIR/$domain.key" ]; then
+                log "证书已写入 $SSL_DIR"
+                return 0
+            else
+                err "acme.sh 虽然声称成功但未能将证书写入 $SSL_DIR，查看 /tmp/acme_install.log 获取更多信息"
+                return 1
+            fi
         fi
         ((retries++))
     done
 
-    log "Let\'s Encrypt 失败，尝试使用 ZeroSSL"
+    log "Let's Encrypt 失败，尝试使用 ZeroSSL"
     if "$ACME_DIR/acme.sh" --set-default-ca --server zerossl >/dev/null 2>&1; then
         if "$ACME_DIR/acme.sh" --issue -d "$domain" --standalone --accountemail "$email" --force --log >/tmp/acme_issue.log 2>&1; then
             log "acme.sh (ZeroSSL) 申请成功"
-            # 恢复默认 CA 为 letsencrypt，方便后续续期（可按需保留）
-            "$ACME_DIR/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-            return 0
+            mkdir -p "$SSL_DIR"
+            "$ACME_DIR/acme.sh" --install-cert -d "$domain" \
+                --key-file "$SSL_DIR/$domain.key" \
+                --fullchain-file "$SSL_DIR/$domain.crt" \
+                --reloadcmd "systemctl restart xray" >/tmp/acme_install.log 2>&1 || true
+            if [ -s "$SSL_DIR/$domain.crt" ] && [ -s "$SSL_DIR/$domain.key" ]; then
+                # 恢复默认 CA 为 letsencrypt，方便后续续期（可按需保留）
+                "$ACME_DIR/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+                log "证书已写入 $SSL_DIR"
+                return 0
+            else
+                err "ZeroSSL 申请成功但未能将证书写入 $SSL_DIR，查看 /tmp/acme_install.log 获取更多信息"
+                # 不立刻返回，尝试 certbot 回退
+            fi
         fi
     fi
 
-    err "acme.sh 使用内置 CA 申请均失败，尝试使用 certbot 申请（http-01）。"
+    err "acme.sh 使用内置 CA 申请均失败或未正确写入证书，尝试使用 certbot 申请（http-01）。"
+    # 使用 certbot 申请
     if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos --email "$email"; then
         log "certbot 申请成功，证书路径：/etc/letsencrypt/live/$domain/"
-        # 将 certbot 生成的证书复制到指定目录
         mkdir -p "$SSL_DIR"
-        cp "/etc/letsencrypt/live/$domain/fullchain.pem" "$SSL_DIR/$domain.crt"
-        cp "/etc/letsencrypt/live/$domain/privkey.pem" "$SSL_DIR/$domain.key"
-        return 0
+        # 使用真实文件（避免软链接问题），使用 openssl to copy ensures permissions
+        if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/$domain/privkey.pem" ]; then
+            cp -L "/etc/letsencrypt/live/$domain/fullchain.pem" "$SSL_DIR/$domain.crt" || cp "/etc/letsencrypt/live/$domain/fullchain.pem" "$SSL_DIR/$domain.crt"
+            cp -L "/etc/letsencrypt/live/$domain/privkey.pem" "$SSL_DIR/$domain.key" || cp "/etc/letsencrypt/live/$domain/privkey.pem" "$SSL_DIR/$domain.key"
+            chmod 644 "$SSL_DIR/$domain.crt" || true
+            chmod 600 "$SSL_DIR/$domain.key" || true
+            log "已将 certbot 生成的证书复制到 $SSL_DIR"
+            # 尝试重启 xray
+            systemctl restart xray.service || true
+            return 0
+        else
+            err "certbot 申请成功但找不到 /etc/letsencrypt/live/$domain 下的证书文件。"
+            return 1
+        fi
     fi
 
     return 1
