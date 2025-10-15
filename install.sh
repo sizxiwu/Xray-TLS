@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =================================================================
+# Xray 一键安装脚本
+#
+# 特性:
+# - VLess 协议: 仅支持 WebSocket + TLS (高兼容性)
+# - VMess 协议: 支持 WebSocket + TLS 和 TCP + TLS (HTTP 伪装)
+# - 自动检测域名解析，等待生效
+# - 允许自定义 HTTP 伪装头 (Path, Host, User-Agent)
+# - 使用 acme.sh 自动申请和续签 SSL 证书
+# - 提供完整的安装、卸载、管理功能
+# =================================================================
+
+
 # ========================
 # 配置参数
 # ========================
 XRAY_PORT=443
-# HTTP 伪装和 WebSocket 模式共用的路径
-HTTP_PATH="/"
 # WebSocket (ws) 模式下伪装的 Host
 WS_HOST="yunpanlive.chinaunicomvideo.cn"
 # 按要求，使用 root 用户运行
@@ -49,7 +60,7 @@ check_port() {
 check_dns() {
     local domain=$1
     local attempt=1
-    local max_attempts=10 # 10次尝试，总计约5分钟
+    local max_attempts=10
     
     echo "=== 正在检测域名解析，请确保域名已指向本服务器 IP ==="
     
@@ -164,26 +175,46 @@ install_xray() {
     echo "1) VMess"
     echo "2) VLess"
     read -rp "请输入选项 [1-2]: " PROTO_CHOICE
+    
+    PROTOCOL=""
     case $PROTO_CHOICE in
         1) PROTOCOL="vmess";;
         2) PROTOCOL="vless";;
         *) echo "错误：无效选项"; exit 1;;
     esac
 
-    echo "请选择传输协议:"
-    echo "1) WebSocket + TLS (ws)"
-    echo "2) TCP + TLS (HTTP Camouflage)"
-    read -rp "请输入选项 [1-2]: " TRANSPORT_CHOICE
     TRANSPORT_NETWORK=""
-    XRAY_FLOW=""
-    case $TRANSPORT_CHOICE in
-        1) TRANSPORT_NETWORK="ws";;
-        2) TRANSPORT_NETWORK="tcp";;
-        *) echo "错误：无效选项"; exit 1;;
-    esac
+    # 用于 HTTP 和 WS 的变量
+    HTTP_PATH=""
+    HTTP_HOST_HEADER=""
+    HTTP_USER_AGENT=""
 
-    if [ "$PROTOCOL" = "vless" ] && [ "$TRANSPORT_NETWORK" = "tcp" ]; then
-        XRAY_FLOW="xtls-rprx-vision"
+    if [ "$PROTOCOL" = "vless" ]; then
+        echo "--- VLess 协议默认使用 WebSocket + TLS 传输 (高兼容性) ---"
+        TRANSPORT_NETWORK="ws"
+        read -rp "请输入 WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
+    else # VMess 协议
+        echo "请为 VMess 协议选择传输协议:"
+        echo "1) WebSocket + TLS (ws)"
+        echo "2) TCP + TLS (HTTP Camouflage)"
+        read -rp "请输入选项 [1-2]: " TRANSPORT_CHOICE
+        
+        case $TRANSPORT_CHOICE in
+            1) 
+                TRANSPORT_NETWORK="ws"
+                read -rp "请输入 WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
+                ;;
+            2) 
+                TRANSPORT_NETWORK="tcp"
+                echo "--- 开始自定义 HTTP 伪装头 ---"
+                read -rp "请输入 HTTP 伪装路径 [/]: " -e -i "/" HTTP_PATH
+                read -rp "请输入 HTTP Host 伪装头 [${DOMAIN}]: " -e -i "${DOMAIN}" HTTP_HOST_HEADER
+                read -rp "请输入 HTTP User-Agent 伪装头 [Chrome UA]: " -e -i "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" HTTP_USER_AGENT
+                ;;
+            *) 
+                echo "错误：无效选项"; exit 1
+                ;;
+        esac
     fi
 
     check_port 80
@@ -200,6 +231,7 @@ install_xray() {
         RELATIVE_URL="github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         XURL="${MIRROR_PREFIX}${RELATIVE_URL}"
         TMP_ZIP="/tmp/xray.zip"
+        echo "正在下载 Xray 核心..."
         curl -L -o "$TMP_ZIP" "$XURL"
         unzip -o "$TMP_ZIP" -d /tmp/xray_unpack >/dev/null
         install -m 755 /tmp/xray_unpack/xray "$XRAY_BIN_DIR/xray"
@@ -232,7 +264,10 @@ EOF
                 "request": {
                     "path": ["${HTTP_PATH}"],
                     "headers": {
-                        "Host": ["${DOMAIN}"]
+                        "Host": ["${HTTP_HOST_HEADER}"],
+                        "User-Agent": ["${HTTP_USER_AGENT}"],
+                        "Accept-Encoding": ["gzip, deflate"],
+                        "Connection": ["keep-alive"]
                     }
                 }
             }
@@ -249,7 +284,7 @@ EOF
     "inbounds": [
         {
             "port": ${XRAY_PORT}, "listen": "0.0.0.0", "protocol": "${PROTOCOL}",
-            "settings": { "clients": [{"id": "${UUID}"${XRAY_FLOW:+, "flow": "$XRAY_FLOW"}}], "decryption": "none" },
+            "settings": { "clients": [{"id": "${UUID}"}], "decryption": "none" },
             ${STREAM_SETTINGS_JSON}
         }
     ],
@@ -290,21 +325,17 @@ EOF
         echo "WebSocket 路径   : $HTTP_PATH"
         echo "WebSocket 主机   : $WS_HOST"
     else
-        echo "HTTP 伪装路径    : $HTTP_PATH"
-        echo "HTTP 伪装主机    : $DOMAIN"
-    fi
-    if [ -n "$XRAY_FLOW" ]; then
-        echo "流控 (Flow)      : $XRAY_FLOW"
+        echo "--- HTTP 伪装配置 (仅VMess) ---"
+        echo "伪装路径 (Path)  : $HTTP_PATH"
+        echo "伪装主机 (Host)  : $HTTP_HOST_HEADER"
+        echo "伪装UA (User-Agent): $HTTP_USER_AGENT"
     fi
     echo "--------------------------------------------------"
 
     CLIENT_LINK=""
     if [ "$PROTOCOL" = "vless" ]; then
-        if [ "$TRANSPORT_NETWORK" = "ws" ]; then
-            CLIENT_LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?type=ws&host=${WS_HOST}&path=${HTTP_PATH}&security=tls&sni=${DOMAIN}&encryption=none#${DOMAIN}-vless-ws"
-        else # tcp
-            CLIENT_LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?security=tls&sni=${DOMAIN}&flow=${XRAY_FLOW}&encryption=none&type=http#${DOMAIN}-vless-tcp-http"
-        fi
+        # VLess 协议在此脚本中只生成 ws 链接
+        CLIENT_LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?type=ws&host=${WS_HOST}&path=${HTTP_PATH}&security=tls&sni=${DOMAIN}&encryption=none#${DOMAIN}-vless-ws"
     else # vmess
         VMESS_JSON=""
         local ps_name="${DOMAIN}-${TRANSPORT_NETWORK}"
@@ -312,7 +343,7 @@ EOF
             VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$WS_HOST" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
                 '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:0,net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni}')
         else # tcp with http camouflage
-            VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$DOMAIN" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
+            VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$HTTP_HOST_HEADER" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
                 '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:0,net:"tcp",type:"http",host:$host,path:$path,tls:"tls",sni:$sni}')
         fi
         CLIENT_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
@@ -349,15 +380,15 @@ main() {
     [ "$(id -u)" -ne 0 ] && { echo "错误：请以 root 或 sudo 权限运行此脚本。"; exit 1; }
 
     clear
-    echo "==================================================="
-    echo "  Xray 一键脚本 (VMess/VLess | ws / tcp-http)"
-    echo "  (带域名解析自动检测功能)"
-    echo "==================================================="
+    echo "======================================================="
+    echo "  Xray 一键安装脚本 (VLess-ws / VMess-ws/tcp)"
+    echo "  (VLess 仅支持 WebSocket 模式)"
+    echo "======================================================="
     echo "1) 安装 Xray"
     echo "2) 卸载 Xray"
     echo "3) 查看 Xray 日志"
     echo "4) 重启 Xray 服务"
-    echo "==================================================="
+    echo "======================================================="
     read -rp "请输入选项 [1-4]: " choice
 
     case $choice in
