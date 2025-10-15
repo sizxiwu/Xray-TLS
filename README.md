@@ -43,7 +43,6 @@
 ```bash
 curl -O https://raw.githubusercontent.com/sizxiwu/Xray-TLS/main/install.sh && chmod +x install.sh && ./install.sh
 ```
-*(请将 `https://your-script-url/install_xray.sh` 替换为您脚本的真实链接)*
 
 ---
 
