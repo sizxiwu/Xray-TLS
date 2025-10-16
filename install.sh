@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =================================================================
-# Xray 一键安装脚本 (vFinal - 直达菜单 & 完全自定义)
+# Xray 一键安装脚本 (vFinal-fix - 直达菜单 & 完全自定义)
 #
 # 特性:
+# - [修复] 如果 iptables 未安装则自动跳过, 避免报错
 # - VLess 协议: 仅支持 WebSocket + TLS (高兼容性)
 # - VMess 协议: 支持 WebSocket + TLS 和 TCP + TLS (HTTP 伪装)
 # - WebSocket 模式支持自定义伪装 Host
-# - 自动检测域名解析，等待生效
-# - 使用 acme.sh 自动申请和续签 SSL 证书
+# - 自动检测域名解析, 等待生效
 # =================================================================
 
 
@@ -31,16 +31,22 @@ ACME_DIR="$HOME/.acme.sh"
 
 # 开放端口并清空防火墙
 open_ports() {
-    echo "=== 放通所有端口，清空防火墙规则 ==="
-    iptables -P INPUT ACCEPT
-    iptables -P FORWARD ACCEPT
-    iptables -P OUTPUT ACCEPT
-    iptables -F
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save
-        echo "防火墙规则已清空并保存。"
+    echo "=== 正在配置防火墙... ==="
+    if command -v iptables >/dev/null 2>&1; then
+        echo "检测到 iptables, 正在清空规则并放通所有端口..."
+        iptables -P INPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -P OUTPUT ACCEPT
+        iptables -F
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save
+            echo "防火墙规则已清空并保存。"
+        else
+            echo "未安装 netfilter-persistent, 跳过保存规则。"
+        fi
     else
-        echo "未安装 netfilter-persistent，跳过保存规则。"
+        echo "未检测到 iptables 命令, 跳过防火墙配置。"
+        echo "请注意: 您需要手动确保云服务商的安全组或您服务器上的其他防火墙(如 ufw)已放行 TCP 443 和 80 端口。"
     fi
 }
 
@@ -350,7 +356,7 @@ main() {
 
     clear
     echo "======================================================="
-    echo "  Xray 一键安装脚本 (直达菜单 & 完全自定义)"
+    echo "  Xray 一键安装脚本 (vFinal-fix)"
     echo "======================================================="
     echo "--- 安装选项 ---"
     echo " 1) 安装 VLESS + WebSocket + TLS"
