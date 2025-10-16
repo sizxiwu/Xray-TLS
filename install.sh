@@ -78,24 +78,34 @@ check_dns() {
 
 install_acme_sh() {
     local EMAIL=$1
-    local MIRROR_PREFIX=""
-    # 如果在中国大陆使用国内镜像
+    # 检测是否在中国大陆
+    local COUNTRY
     COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
     COUNTRY=$(echo -n "$COUNTRY" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
-    [ "$COUNTRY" = "CN" ] && MIRROR_PREFIX="https://gh.llkk.cc/https://"
 
-    # 删除旧目录（防止冲突）
+    # 删除旧目录
     if [ -d "$ACME_DIR" ]; then
         echo "$ACME_DIR 已存在，尝试更新..."
         cd "$ACME_DIR" && git pull || { echo "更新失败，请手动处理"; exit 1; }
     else
-        git clone "${MIRROR_PREFIX}github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
+        if [ "$COUNTRY" = "CN" ]; then
+            echo "使用国内镜像安装 acme.sh ..."
+            mkdir -p "$ACME_DIR"
+            curl -sSfLo /tmp/acme.sh.zip https://gh.llkk.cc/https://github.com/acmesh-official/acme.sh/archive/refs/heads/master.zip
+            unzip -o /tmp/acme.sh.zip -d /tmp/
+            mv /tmp/acme.sh-master/* "$ACME_DIR"
+            rm -rf /tmp/acme.sh.zip /tmp/acme.sh-master
+        else
+            echo "使用官方 GitHub 安装 acme.sh ..."
+            git clone https://github.com/acmesh-official/acme.sh.git "$ACME_DIR"
+        fi
     fi
 
     cd "$ACME_DIR"
     ./acme.sh --install -m "$EMAIL" --force
     chmod +x "$ACME_DIR/acme.sh"
 }
+
 
 
 apply_certificate() {
