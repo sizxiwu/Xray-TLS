@@ -361,7 +361,6 @@ main() {
     echo "--- 安装选项 ---"
     echo " 1) 安装 VLESS + WebSocket + TLS"
     echo " 2) 安装 VMess + WebSocket + TLS"
-    echo " 3) 安装 VMess + TCP + HTTP伪装"
     echo "-------------------------------------------------------"
     echo "--- 管理选项 ---"
     echo " 4) 卸载 Xray"
@@ -373,7 +372,6 @@ main() {
     case $choice in
         1) install_xray "vless" "ws" ;;
         2) install_xray "vmess" "ws" ;;
-        3) install_xray "vmess" "tcp" ;;
         4) uninstall_xray ;;
         5) journalctl -u xray -f ;;
         6) systemctl restart xray.service && echo "Xray 已重启" ;;
