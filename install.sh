@@ -125,7 +125,7 @@ install_xray() {
     [ -z "$EMAIL" ] && { echo "邮箱不能为空"; exit 1; }
 
     apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip uuid-runtime openssl socat jq cron python3 dnsutils
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip uuid-runtime openssl socat jq cron python3 dnsutils git
     systemctl enable --now cron
 
     check_dns "$DOMAIN"
