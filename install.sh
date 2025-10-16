@@ -122,12 +122,20 @@ apply_certificate() {
     local attempt=1
     local max_attempts=3
 
+    echo "=== 安装 acme.sh ==="
+    curl https://get.acme.sh | sh
+    chmod +x "$ACME_DIR/acme.sh"
+
+    # 设置默认 CA 为国内 ZeroSSL
+    "$ACME_DIR/acme.sh" --set-default-ca --server zerossl
+
     while [ $attempt -le $max_attempts ]; do
         echo "=== 正在尝试申请 SSL 证书 (第 $attempt / $max_attempts 次)... ==="
         "$ACME_DIR/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force
 
         if [ $? -eq 0 ]; then
             echo "=== 证书申请成功！ ==="
+            mkdir -p "$SSL_DIR"
             "$ACME_DIR/acme.sh" --install-cert -d "$domain" --ecc \
                 --key-file "$SSL_DIR/$domain.key" \
                 --fullchain-file "$SSL_DIR/$domain.crt" \
@@ -154,8 +162,6 @@ apply_certificate() {
     done
 }
 
-
-install_xray() {
     # 接收从主菜单传递的参数
     local PROTOCOL=$1
     local TRANSPORT_NETWORK=$2
