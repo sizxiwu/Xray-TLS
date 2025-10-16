@@ -86,16 +86,18 @@ install_acme_sh() {
 
     # 删除旧目录（防止冲突）
     if [ -d "$ACME_DIR" ]; then
-        echo "$ACME_DIR 已存在，尝试更新..."
-        cd "$ACME_DIR" && git pull || { echo "更新失败，请手动处理"; exit 1; }
-    else
-        git clone "${MIRROR_PREFIX}https://github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
+        echo "$ACME_DIR 已存在，删除旧目录..."
+        rm -rf "$ACME_DIR"
     fi
+
+    # 克隆 acme.sh
+    git clone "${MIRROR_PREFIX}https://github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
 
     cd "$ACME_DIR"
     ./acme.sh --install -m "$EMAIL" --force
     chmod +x "$ACME_DIR/acme.sh"
 }
+
 
 
 
