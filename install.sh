@@ -5,6 +5,12 @@ set -euo pipefail
 # Xray 一键安装脚本 (vFinal-fix - 支持多 CA 轮询 & 国内加速)
 # =================================================================
 
+# 如果 acme.sh 目录存在，先删除
+if [ -d "$HOME/acme.sh" ]; then
+    echo "检测到 $HOME/acme.sh 目录，正在删除..."
+    rm -rf "$HOME/acme.sh"
+fi
+
 XRAY_PORT=443
 XRAY_USER="root"
 XRAY_BIN_DIR="/usr/local/bin"
