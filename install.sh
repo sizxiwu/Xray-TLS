@@ -89,7 +89,7 @@ install_acme_sh() {
         echo "$ACME_DIR 已存在，尝试更新..."
         cd "$ACME_DIR" && git pull || { echo "更新失败，请手动处理"; exit 1; }
     else
-        git clone "${MIRROR_PREFIX}https://github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
+        git clone "${MIRROR_PREFIX}github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
     fi
 
     cd "$ACME_DIR"
