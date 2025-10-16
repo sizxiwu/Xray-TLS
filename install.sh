@@ -5,11 +5,6 @@ set -euo pipefail
 # Xray 一键安装脚本 (vFinal-fix - 支持多 CA 轮询 & 国内加速)
 # =================================================================
 
-# 如果 acme.sh 目录存在，先删除
-if [ -d "$HOME/acme.sh" ]; then
-    echo "检测到 $HOME/acme.sh 目录，正在删除..."
-    rm -rf "$HOME/acme.sh"
-fi
 
 XRAY_PORT=443
 XRAY_USER="root"
@@ -83,20 +78,25 @@ check_dns() {
 
 install_acme_sh() {
     local EMAIL=$1
-    [ -d "$ACME_DIR" ] && rm -rf "$ACME_DIR"
-    git clone https://github.com/acmesh-official/acme.sh.git "$ACME_DIR"
+    local MIRROR_PREFIX=""
+    # 如果在中国大陆使用国内镜像
+    COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
+    COUNTRY=$(echo -n "$COUNTRY" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
+    [ "$COUNTRY" = "CN" ] && MIRROR_PREFIX="https://gh.llkk.cc/https://"
+
+    # 删除旧目录（防止冲突）
+    if [ -d "$ACME_DIR" ]; then
+        echo "$ACME_DIR 已存在，尝试更新..."
+        cd "$ACME_DIR" && git pull || { echo "更新失败，请手动处理"; exit 1; }
+    else
+        git clone "${MIRROR_PREFIX}https://github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
+    fi
+
     cd "$ACME_DIR"
     ./acme.sh --install -m "$EMAIL" --force
     chmod +x "$ACME_DIR/acme.sh"
-
-    # 国内镜像加速
-    COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || echo "")
-    COUNTRY=$(echo -n "$COUNTRY" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
-    if [ "$COUNTRY" = "CN" ]; then
-        MIRROR_PREFIX="https://gh.llkk.cc/https://"
-        export MIRROR_PREFIX
-    fi
 }
+
 
 apply_certificate() {
     local DOMAIN=$1
