@@ -2,10 +2,20 @@
 set -euo pipefail
 
 # =================================================================
-# Xray 一键安装脚本 (vFinal-fix - 支持多 CA 轮询 & 国内加速)
+# Xray 一键安装脚本 (vFinal-fix - 直达菜单 & 完全自定义)
+#
+# 特性:
+# - [修复] 如果 iptables 未安装则自动跳过, 避免报错
+# - VLess 协议: 仅支持 WebSocket + TLS (高兼容性)
+# - VMess 协议: 支持 WebSocket + TLS 和 TCP + TLS (HTTP 伪装)
+# - WebSocket 模式支持自定义伪装 Host
+# - 自动检测域名解析, 等待生效
 # =================================================================
 
 
+# ========================
+# 配置参数
+# ========================
 XRAY_PORT=443
 XRAY_USER="root"
 XRAY_BIN_DIR="/usr/local/bin"
@@ -19,130 +29,168 @@ ACME_DIR="$HOME/.acme.sh"
 # 函数定义
 # ========================
 
+# 开放端口并清空防火墙
 open_ports() {
-    echo "=== 配置防火墙... ==="
+    echo "=== 正在配置防火墙... ==="
     if command -v iptables >/dev/null 2>&1; then
+        echo "检测到 iptables, 正在清空规则并放通所有端口..."
         iptables -P INPUT ACCEPT
         iptables -P FORWARD ACCEPT
         iptables -P OUTPUT ACCEPT
         iptables -F
         if command -v netfilter-persistent >/dev/null 2>&1; then
             netfilter-persistent save
+            echo "防火墙规则已清空并保存。"
+        else
+            echo "未安装 netfilter-persistent, 跳过保存规则。"
         fi
     else
-        echo "未检测到 iptables，请确保安全组/防火墙允许 80/443 端口"
+        echo "未检测到 iptables 命令, 跳过防火墙配置。"
+        echo "请注意: 您需要手动确保云服务商的安全组或您服务器上的其他防火墙(如 ufw)已放行 TCP 443 和 80 端口。"
     fi
 }
 
+# 检测端口占用
 check_port() {
     if ss -ltnp | grep -q ":$1"; then
-        echo "错误：端口 $1 已被占用"
+        echo "错误：端口 $1 已被占用，请先释放该端口再运行脚本。"
         exit 1
     fi
 }
 
+# 检测域名解析是否正确
 check_dns() {
     local domain=$1
     local attempt=1
     local max_attempts=10
 
+    echo "=== 正在检测域名解析，请确保域名已指向本服务器 IP ==="
+
     local server_ipv4=$(curl -s4 https://api.ipify.org || curl -s4 https://ipinfo.io/ip || echo "")
     local server_ipv6=$(curl -s6 https://api.ipify.org || curl -s6 https://ipinfo.io/ip || echo "")
 
     if [ -z "$server_ipv4" ] && [ -z "$server_ipv6" ]; then
-        echo "无法获取服务器公网 IP"
+        echo "错误：无法获取服务器的公网 IP 地址。请检查网络连接。"
         exit 1
     fi
 
+    echo "服务器 IPv4 地址: ${server_ipv4:-N/A}"
+    echo "服务器 IPv6 地址: ${server_ipv6:-N/A}"
+
     while [ $attempt -le $max_attempts ]; do
+        echo "--- 第 $attempt / $max_attempts 次尝试 ---"
+
         local resolved_ipv4=$(dig +short A "$domain" | tail -n1)
         local resolved_ipv6=$(dig +short AAAA "$domain" | tail -n1)
 
+        echo "域名 $domain 解析到 IPv4: ${resolved_ipv4:-N/A}"
+        echo "域名 $domain 解析到 IPv6: ${resolved_ipv6:-N/A}"
+
         local matched=false
-        [ -n "$server_ipv4" ] && [ "$resolved_ipv4" == "$server_ipv4" ] && matched=true
-        [ -n "$server_ipv6" ] && [ "$resolved_ipv6" == "$server_ipv6" ] && matched=true
+
+        if [ -n "$server_ipv4" ] && [ "$resolved_ipv4" == "$server_ipv4" ]; then
+            echo "IPv4 解析正确。"
+            matched=true
+        fi
+
+        if [ -n "$server_ipv6" ] && [ "$resolved_ipv6" == "$server_ipv6" ]; then
+            echo "IPv6 解析正确。"
+            matched=true
+        fi
 
         if $matched; then
-            echo "域名解析正确"
+            echo "=== 域名解析检测通过！ ==="
             return 0
         fi
 
-        echo "域名解析未生效，30 秒后重试..."
-        sleep 30
+        echo "域名解析不匹配或尚未生效。"
+        if [ $attempt -lt $max_attempts ]; then
+            echo "将在 30 秒后重试..."
+            sleep 30
+        else
+            echo "错误：域名解析检测失败。"
+            echo "请将域名 $domain 的 A 记录(IPv4) 或 AAAA 记录(IPv6) 指向您的服务器 IP。"
+            exit 1
+        fi
         ((attempt++))
     done
-
-    echo "域名解析检测失败"
-    exit 1
 }
 
-install_acme_sh() {
-    local EMAIL=$1
-    local MIRROR_PREFIX=""
-    # 如果在中国大陆使用国内镜像
-    COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
-    COUNTRY=$(echo -n "$COUNTRY" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
-    [ "$COUNTRY" = "CN" ] && MIRROR_PREFIX="https://gh.llkk.cc/"
+# 申请并安装证书（支持多 CA 轮询：ZeroSSL, Let's Encrypt, SSL.com, Actalis, Pebble）
+apply_certificate() {
+    local domain=$1
+    local attempt=1
+    local max_attempts_per_ca=3
 
-    # 删除旧目录（防止冲突）
-    if [ -d "$ACME_DIR" ]; then
-        echo "$ACME_DIR 已存在，删除旧目录..."
-        rm -rf "$ACME_DIR"
+    # 如果 acme.sh 不存在，按原脚本方式安装（保持兼容）
+    if [ ! -x "${ACME_DIR}/acme.sh" ]; then
+        echo "acme.sh 未发现，正在安装 acme.sh ..."
+        curl https://get.acme.sh | sh
+        chmod +x "${ACME_DIR}/acme.sh" || true
     fi
 
-    # 克隆 acme.sh
-    git clone "${MIRROR_PREFIX}https://github.com/acmesh-official/acme.sh.git" "$ACME_DIR"
+    # 支持的 CA 列表（按优先级）
+    local CA_LIST=("zerossl" "letsencrypt" "ssl.com" "actalis" "pebble")
 
-    cd "$ACME_DIR"
-    ./acme.sh --install -m "$EMAIL" --force
-    chmod +x "$ACME_DIR/acme.sh"
-}
-
-
-
-
-
-apply_certificate() {
-    local DOMAIN=$1
-    local EMAIL=$2
-    echo "=== 申请 SSL 证书 ==="
-    install_acme_sh "$EMAIL"
+    echo "=== 开始多 CA 轮询申请证书：${CA_LIST[*]} ==="
     mkdir -p "$SSL_DIR"
 
-    local CA_LIST=("zerossl" "letsencrypt" "ssl.com" "actalis" "pebble")
-    local CA_NAME
-    for CA_NAME in "${CA_LIST[@]}"; do
-        echo "尝试使用 CA: $CA_NAME"
-        for attempt in {1..3}; do
-            if "$ACME_DIR/acme.sh" --issue -d "$DOMAIN" --standalone --keylength ec-256 --server "$CA_NAME" --force; then
-                echo "证书申请成功 (CA: $CA_NAME)"
-                "$ACME_DIR/acme.sh" --install-cert -d "$DOMAIN" --ecc \
-                    --key-file "$SSL_DIR/$DOMAIN.key" \
-                    --fullchain-file "$SSL_DIR/$DOMAIN.crt" \
-                    --reloadcmd "systemctl restart xray"
-                return 0
+    local ca
+    for ca in "${CA_LIST[@]}"; do
+        echo "----- 尝试 CA: $ca -----"
+        attempt=1
+        # 如果 acme.sh 支持设置默认 CA，尝试设置（有助于某些 CA 的内部逻辑）
+        "${ACME_DIR}/acme.sh" --set-default-ca --server "$ca" >/dev/null 2>&1 || true
+
+        while [ $attempt -le $max_attempts_per_ca ]; do
+            echo "=== 使用 CA[$ca] 尝试申请 (第 $attempt / $max_attempts_per_ca 次) ==="
+            # 使用 --server 指定 CA；仍然使用 standalone HTTP 验证（需 80 端口可用）
+            if "${ACME_DIR}/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --server "$ca" --force; then
+                echo "=== 证书申请成功！(CA: $ca) ==="
+                # 安装证书到指定目录并重载 xray
+                if "${ACME_DIR}/acme.sh" --install-cert -d "$domain" --ecc \
+                    --key-file "$SSL_DIR/$domain.key" \
+                    --fullchain-file "$SSL_DIR/$domain.crt" \
+                    --reloadcmd "systemctl restart xray"; then
+                    echo "=== 证书安装成功 (CA: $ca) ==="
+                    return 0
+                else
+                    echo "错误：证书安装（写入/重载）失败 (CA: $ca)。"
+                    return 1
+                fi
             else
-                echo "申请失败 (第 $attempt 次)，重试..."
-                sleep 5
+                echo "证书申请失败 (CA: $ca, 第 $attempt 次)。"
+                if [ $attempt -lt $max_attempts_per_ca ]; then
+                    echo "等待 5 秒后重试..."
+                    sleep 5
+                fi
             fi
+            ((attempt++))
         done
-        echo "使用 CA $CA_NAME 申请失败，尝试下一个 CA..."
+
+        echo "使用 CA $ca 申请失败，切换下一个 CA..."
+        # 继续尝试下一个 CA
     done
 
-    echo "错误：所有 CA 均申请失败，请检查 80 端口或网络是否可访问"
-    exit 1
+    echo "错误：所有 CA 均申请失败。请检查 80 端口、防火墙、域名解析或网络连通性。"
+    return 1
 }
 
-install_xray() {
-    local PROTOCOL=$1
-    local TRANSPORT=$2
 
-    echo "--- 安装: $PROTOCOL + $TRANSPORT + TLS ---"
+install_xray() {
+    # 接收从主菜单传递的参数
+    local PROTOCOL=$1
+    local TRANSPORT_NETWORK=$2
+
+    echo "--- 您选择了安装: ${PROTOCOL} + ${TRANSPORT_NETWORK} + TLS ---"
     open_ports
 
-    read -rp "请输入域名: " DOMAIN
+    [ -d "$ACME_DIR" ] && rm -rf "$ACME_DIR"
+
+    read -rp "请输入 TLS 使用的域名（例如 xxx.com）： " DOMAIN
     [ -z "$DOMAIN" ] && { echo "域名不能为空"; exit 1; }
-    read -rp "请输入邮箱: " EMAIL
+
+    read -rp "请输入用于证书注册的邮箱： " EMAIL
     [ -z "$EMAIL" ] && { echo "邮箱不能为空"; exit 1; }
 
     apt-get update -y
@@ -151,18 +199,26 @@ install_xray() {
 
     check_dns "$DOMAIN"
 
-    local HTTP_PATH="/" WS_HOST="$DOMAIN" HTTP_HOST_HEADER="$DOMAIN" HTTP_USER_AGENT="Mozilla/5.0"
-    if [ "$TRANSPORT" = "ws" ]; then
-        read -rp "WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
-        read -rp "WebSocket Host [${DOMAIN}]: " -e -i "${DOMAIN}" WS_HOST
-    else
-        read -rp "HTTP 伪装路径 [/]: " -e -i "/" HTTP_PATH
-        read -rp "HTTP Host 伪装头 [${DOMAIN}]: " -e -i "${DOMAIN}" HTTP_HOST_HEADER
-        read -rp "HTTP User-Agent [默认Chrome UA]: " -e -i "$HTTP_USER_AGENT" HTTP_USER_AGENT
+    local HTTP_PATH=""
+    local WS_HOST=""
+    local HTTP_HOST_HEADER=""
+    local HTTP_USER_AGENT=""
+
+    if [ "$TRANSPORT_NETWORK" = "ws" ]; then
+        read -rp "请输入 WebSocket 路径 [/]: " -e -i "/" HTTP_PATH
+        read -rp "请输入 WebSocket 伪装域名 (Host) [${DOMAIN}]: " -e -i "${DOMAIN}" WS_HOST
+    else # tcp
+        echo "--- 开始自定义 HTTP 伪装头 ---"
+        read -rp "请输入 HTTP 伪装路径 [/]: " -e -i "/" HTTP_PATH
+        read -rp "请输入 HTTP Host 伪装头 [${DOMAIN}]: " -e -i "${DOMAIN}" HTTP_HOST_HEADER
+        read -rp "请输入 HTTP User-Agent 伪装头 [Chrome UA]: " -e -i "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" HTTP_USER_AGENT
     fi
 
     check_port 80
     check_port $XRAY_PORT
+
+    curl https://get.acme.sh | sh -s email=$EMAIL --force
+    chmod +x "$ACME_DIR/acme.sh"
 
     if ! command -v xray >/dev/null 2>&1; then
         COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
@@ -172,6 +228,7 @@ install_xray() {
         RELATIVE_URL="github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         XURL="${MIRROR_PREFIX}${RELATIVE_URL}"
         TMP_ZIP="/tmp/xray.zip"
+        echo "正在下载 Xray 核心..."
         curl -L -o "$TMP_ZIP" "$XURL"
         unzip -o "$TMP_ZIP" -d /tmp/xray_unpack >/dev/null
         install -m 755 /tmp/xray_unpack/xray "$XRAY_BIN_DIR/xray"
@@ -179,54 +236,56 @@ install_xray() {
     fi
 
     mkdir -p "$XRAY_CONFIG_DIR" "$SSL_DIR" "$XRAY_LOG_DIR"
-    local UUID=$(uuidgen)
+
+    UUID=$(uuidgen)
     echo "生成 UUID: $UUID"
 
-    local STREAM_SETTINGS=""
-    if [ "$TRANSPORT" = "ws" ]; then
-        STREAM_SETTINGS=$(cat <<EOF
-"streamSettings": {
-    "network": "ws", "security": "tls",
-    "tlsSettings": { "certificates": [{"certificateFile": "${SSL_DIR}/${DOMAIN}.crt","keyFile": "${SSL_DIR}/${DOMAIN}.key"}], "serverName": "${DOMAIN}" },
-    "wsSettings": {"path": "${HTTP_PATH}","headers":{ "Host": "${WS_HOST}" }}
-}
+    local STREAM_SETTINGS_JSON=""
+    if [ "$TRANSPORT_NETWORK" = "ws" ]; then
+        STREAM_SETTINGS_JSON=$(cat <<EOF
+    "streamSettings": {
+        "network": "ws", "security": "tls",
+        "tlsSettings": { "certificates": [{"certificateFile": "${SSL_DIR}/${DOMAIN}.crt","keyFile": "${SSL_DIR}/${DOMAIN}.key"}], "serverName": "${DOMAIN}" },
+        "wsSettings": {"path": "${HTTP_PATH}","headers":{ "Host": "${WS_HOST}" }}
+    }
 EOF
 )
-    else
-        STREAM_SETTINGS=$(cat <<EOF
-"streamSettings": {
-    "network": "tcp", "security": "tls",
-    "tlsSettings": { "certificates": [{"certificateFile": "${SSL_DIR}/${DOMAIN}.crt","keyFile": "${SSL_DIR}/${DOMAIN}.key"}], "serverName": "${DOMAIN}" },
-    "tcpSettings": {
-        "header": {
-            "type": "http",
-            "request": {
-                "path": ["${HTTP_PATH}"],
-                "headers": {
-                    "Host": ["${HTTP_HOST_HEADER}"],
-                    "User-Agent": ["${HTTP_USER_AGENT}"],
-                    "Accept-Encoding": ["gzip, deflate"],
-                    "Connection": ["keep-alive"]
+    else # tcp with http camouflage
+        STREAM_SETTINGS_JSON=$(cat <<EOF
+    "streamSettings": {
+        "network": "tcp", "security": "tls",
+        "tlsSettings": { "certificates": [{"certificateFile": "${SSL_DIR}/${DOMAIN}.crt","keyFile": "${SSL_DIR}/${DOMAIN}.key"}], "serverName": "${DOMAIN}" },
+        "tcpSettings": {
+            "header": {
+                "type": "http",
+                "request": {
+                    "path": ["${HTTP_PATH}"],
+                    "headers": {
+                        "Host": ["${HTTP_HOST_HEADER}"],
+                        "User-Agent": ["${HTTP_USER_AGENT}"],
+                        "Accept-Encoding": ["gzip, deflate"],
+                        "Connection": ["keep-alive"]
+                    }
                 }
             }
         }
     }
-}
 EOF
 )
     fi
 
-    cat >"$XRAY_CONFIG_DIR/config.json" <<EOF
+    XRAY_CONF="$XRAY_CONFIG_DIR/config.json"
+    cat >"$XRAY_CONF" <<EOF
 {
-"log": { "access": "${XRAY_LOG_DIR}/access.log", "error": "${XRAY_LOG_DIR}/error.log", "loglevel": "warning" },
-"inbounds": [
-    {
-        "port": ${XRAY_PORT}, "listen": "0.0.0.0", "protocol": "${PROTOCOL}",
-        "settings": { "clients": [{"id": "${UUID}"}], "decryption": "none" },
-        ${STREAM_SETTINGS}
-    }
-],
-"outbounds":[{"protocol":"freedom","settings":{}},{"protocol":"blackhole","tag":"blocked","settings":{}}]
+    "log": { "access": "${XRAY_LOG_DIR}/access.log", "error": "${XRAY_LOG_DIR}/error.log", "loglevel": "warning" },
+    "inbounds": [
+        {
+            "port": ${XRAY_PORT}, "listen": "0.0.0.0", "protocol": "${PROTOCOL}",
+            "settings": { "clients": [{"id": "${UUID}"}], "decryption": "none" },
+            ${STREAM_SETTINGS_JSON}
+        }
+    ],
+    "outbounds":[{"protocol":"freedom","settings":{}},{"protocol":"blackhole","tag":"blocked","settings":{}}]
 }
 EOF
 
@@ -236,7 +295,7 @@ Description=Xray Service
 After=network.target
 [Service]
 User=${XRAY_USER}
-ExecStart=${XRAY_BIN_DIR}/xray -config ${XRAY_CONFIG_DIR}/config.json
+ExecStart=${XRAY_BIN_DIR}/xray -config ${XRAY_CONF}
 Restart=on-failure
 RestartSec=3s
 [Install]
@@ -246,54 +305,99 @@ EOF
     systemctl daemon-reload
     systemctl enable xray.service
 
-    apply_certificate "$DOMAIN" "$EMAIL"
+    if ! apply_certificate "$DOMAIN"; then
+        echo "安装过程中断，因为证书申请失败。"
+        exit 1
+    fi
+
     systemctl restart xray.service
 
-    echo "安装完成！"
-    echo "UUID: $UUID"
-    echo "域名: $DOMAIN"
-    echo "端口: $XRAY_PORT"
-    echo "WebSocket路径: $HTTP_PATH"
-    echo "客户端链接: "
-    if [ "$PROTOCOL" = "vless" ]; then
-        echo "vless://${UUID}@${DOMAIN}:${XRAY_PORT}?type=ws&host=${WS_HOST}&path=${HTTP_PATH}&security=tls&sni=${DOMAIN}&encryption=none#${DOMAIN}-vless-ws"
+    echo "==================== 安装完成 ===================="
+    echo "协议 (Protocol)  : $PROTOCOL"
+    echo "传输 (Transport) : $TRANSPORT_NETWORK"
+    echo "域名 (Domain)    : $DOMAIN"
+    echo "端口 (Port)      : $XRAY_PORT"
+    echo "UUID             : $UUID"
+    if [ "$TRANSPORT_NETWORK" = "ws" ]; then
+        echo "WebSocket 路径   : $HTTP_PATH"
+        echo "WebSocket 主机   : $WS_HOST"
     else
-        local VMESS_JSON=$(jq -n --arg ps "${DOMAIN}-${TRANSPORT}" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$WS_HOST" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
-            '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:0,net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni}')
-        echo "vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+        echo "--- HTTP 伪装配置 (仅VMess) ---"
+        echo "伪装路径 (Path)  : $HTTP_PATH"
+        echo "伪装主机 (Host)  : $HTTP_HOST_HEADER"
+        echo "伪装UA (User-Agent): $HTTP_USER_AGENT"
     fi
+    echo "--------------------------------------------------"
+
+    local CLIENT_LINK=""
+    if [ "$PROTOCOL" = "vless" ]; then
+        # VLess 协议在此脚本中只生成 ws 链接
+        CLIENT_LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?type=ws&host=${WS_HOST}&path=${HTTP_PATH}&security=tls&sni=${DOMAIN}&encryption=none#${DOMAIN}-vless-ws"
+    else # vmess
+        local VMESS_JSON=""
+        local ps_name="${DOMAIN}-${TRANSPORT_NETWORK}"
+        if [ "$TRANSPORT_NETWORK" = "ws" ]; then
+            VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$WS_HOST" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
+                '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:0,net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$sni}')
+        else # tcp with http camouflage
+            VMESS_JSON=$(jq -n --arg ps "$ps_name" --arg add "$DOMAIN" --arg port "$XRAY_PORT" --arg id "$UUID" --arg host "$HTTP_HOST_HEADER" --arg path "$HTTP_PATH" --arg sni "$DOMAIN" \
+                '{v:"2",ps:$ps,add:$add,port:$port,id:$id,aid:0,net:"tcp",type:"http",host:$host,path:$path,tls:"tls",sni:$sni}')
+        fi
+        CLIENT_LINK="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+    fi
+
+    echo "客户端导入链接:"
+    echo "$CLIENT_LINK"
+    echo "=================================================="
+    echo "常用命令："
+    echo "查看 Xray 日志: journalctl -u xray -f"
+    echo "重启 Xray 服务: systemctl restart xray"
 }
 
 uninstall_xray() {
-    read -rp "确定卸载 Xray? [y/N]: " confirm
-    [[ ! "$confirm" =~ ^[yY]$ ]] && { echo "取消"; exit 0; }
+    read -rp "您确定要卸载 Xray 吗？[y/N]: " confirm
+    [[ ! "$confirm" =~ ^[yY]$ ]] && { echo "操作已取消"; exit 0; }
+
     systemctl stop xray.service || true
     systemctl disable xray.service || true
-    [ -d "$ACME_DIR" ] && "$ACME_DIR/acme.sh" --uninstall >/dev/null 2>&1 || true
-    rm -rf "$ACME_DIR" "$SYSTEMD_SERVICE" "$XRAY_BIN_DIR/xray" "$XRAY_CONFIG_DIR" "$SSL_DIR" "$XRAY_LOG_DIR"
+
+    if [ -d "$ACME_DIR" ]; then
+        "$ACME_DIR/acme.sh" --uninstall >/dev/null 2>&1 || true
+        rm -rf "$ACME_DIR"
+    fi
+
+    rm -f "$SYSTEMD_SERVICE" "$XRAY_BIN_DIR/xray"
+    rm -rf "$XRAY_CONFIG_DIR" "$SSL_DIR" "$XRAY_LOG_DIR"
+
     systemctl daemon-reload
-    echo "卸载完成"
+    echo "==================== 卸载完成 ===================="
 }
 
 main() {
-    [ "$(id -u)" -ne 0 ] && { echo "请使用 root"; exit 1; }
+    [ "$(id -u)" -ne 0 ] && { echo "错误：请以 root 或 sudo 权限运行此脚本。"; exit 1; }
 
     clear
-    echo "=== Xray 一键安装脚本 ==="
-    echo "1) 安装 VLESS + WS + TLS"
-    echo "2) 安装 VMess + WS + TLS"
-    echo "4) 卸载 Xray"
-    echo "5) 查看日志"
-    echo "6) 重启服务"
-    read -rp "请选择 [1-6]: " choice
+    echo "======================================================="
+    echo "  Xray 一键安装脚本 (vFinal-fix)"
+    echo "======================================================="
+    echo "--- 安装选项 ---"
+    echo " 1) 安装 VLESS + WebSocket + TLS"
+    echo " 2) 安装 VMess + WebSocket + TLS"
+    echo "-------------------------------------------------------"
+    echo "--- 管理选项 ---"
+    echo " 4) 卸载 Xray"
+    echo " 5) 查看 Xray 日志"
+    echo " 6) 重启 Xray 服务"
+    echo "======================================================="
+    read -rp "请输入选项 [1-6]: " choice
 
     case $choice in
         1) install_xray "vless" "ws" ;;
         2) install_xray "vmess" "ws" ;;
         4) uninstall_xray ;;
         5) journalctl -u xray -f ;;
-        6) systemctl restart xray.service && echo "已重启" ;;
-        *) echo "无效"; exit 1 ;;
+        6) systemctl restart xray.service && echo "Xray 已重启" ;;
+        *) echo "错误：无效选项"; exit 1 ;;
     esac
 }
 
