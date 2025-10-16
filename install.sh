@@ -10,6 +10,7 @@ set -euo pipefail
 # - VMess 协议: 支持 WebSocket + TLS 和 TCP + TLS (HTTP 伪装)
 # - WebSocket 模式支持自定义伪装 Host
 # - 自动检测域名解析, 等待生效
+# - acme.sh 使用 ZeroSSL (国内 CA) + standalone HTTP 验证
 # =================================================================
 
 
@@ -116,27 +117,38 @@ check_dns() {
     done
 }
 
-# 申请并安装证书
+# 申请并安装证书（仅修改此函数：使用 ZeroSSL + standalone HTTP）
 apply_certificate() {
     local domain=$1
     local attempt=1
     local max_attempts=3
 
-    echo "=== 安装 acme.sh ==="
-    curl https://get.acme.sh | sh
-    chmod +x "$ACME_DIR/acme.sh"
+    echo "=== 确认 acme.sh 已安装（没有则安装） ==="
+    if [ ! -x "${ACME_DIR}/acme.sh" ]; then
+        curl https://get.acme.sh | sh
+    fi
+
+    # 有时安装脚本不会立即创建目录，确保存在
+    if [ ! -d "${ACME_DIR}" ]; then
+        echo "等待 acme.sh 安装目录创建..."
+        sleep 1
+    fi
+
+    chmod +x "${ACME_DIR}/acme.sh" || true
 
     # 设置默认 CA 为国内 ZeroSSL
-    "$ACME_DIR/acme.sh" --set-default-ca --server zerossl
+    echo "=== 设置默认 CA 为 ZeroSSL ==="
+    "${ACME_DIR}/acme.sh" --set-default-ca --server zerossl || true
 
     while [ $attempt -le $max_attempts ]; do
         echo "=== 正在尝试申请 SSL 证书 (第 $attempt / $max_attempts 次)... ==="
-        "$ACME_DIR/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force
+        # 使用 standalone HTTP 验证（需要 80 端口可用）
+        "${ACME_DIR}/acme.sh" --issue -d "$domain" --standalone --keylength ec-256 --force
 
         if [ $? -eq 0 ]; then
             echo "=== 证书申请成功！ ==="
             mkdir -p "$SSL_DIR"
-            "$ACME_DIR/acme.sh" --install-cert -d "$domain" --ecc \
+            "${ACME_DIR}/acme.sh" --install-cert -d "$domain" --ecc \
                 --key-file "$SSL_DIR/$domain.key" \
                 --fullchain-file "$SSL_DIR/$domain.crt" \
                 --reloadcmd "systemctl restart xray"
@@ -162,6 +174,7 @@ apply_certificate() {
     done
 }
 
+install_xray() {
     # 接收从主菜单传递的参数
     local PROTOCOL=$1
     local TRANSPORT_NETWORK=$2
@@ -169,6 +182,7 @@ apply_certificate() {
     echo "--- 您选择了安装: ${PROTOCOL} + ${TRANSPORT_NETWORK} + TLS ---"
     open_ports
 
+    # 如果存在旧的 acme.sh，先移除（脚本后面会按需安装）
     [ -d "$ACME_DIR" ] && rm -rf "$ACME_DIR"
 
     read -rp "请输入 TLS 使用的域名（例如 xxx.com）： " DOMAIN
@@ -201,8 +215,9 @@ apply_certificate() {
     check_port 80
     check_port $XRAY_PORT
 
-    curl https://get.acme.sh | sh -s email=$EMAIL --force
-    chmod +x "$ACME_DIR/acme.sh"
+    # 不在此处重复安装 acme.sh（apply_certificate 会处理）
+    # curl https://get.acme.sh | sh -s email=$EMAIL --force
+    # chmod +x "$ACME_DIR/acme.sh"
 
     if ! command -v xray >/dev/null 2>&1; then
         COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
@@ -343,10 +358,10 @@ uninstall_xray() {
     [[ ! "$confirm" =~ ^[yY]$ ]] && { echo "操作已取消"; exit 0; }
 
     systemctl stop xray.service || true
-    systemctl disable xray.service || true
+    systemctl.disable xray.service || true 2>/dev/null || true
 
     if [ -d "$ACME_DIR" ]; then
-        "$ACME_DIR/acme.sh" --uninstall >/dev/null 2>&1 || true
+        "${ACME_DIR}/acme.sh" --uninstall >/dev/null 2>&1 || true
         rm -rf "$ACME_DIR"
     fi
 
