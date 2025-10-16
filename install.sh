@@ -29,6 +29,20 @@ ACME_DIR="$HOME/.acme.sh"
 # 函数定义
 # ========================
 
+# 开放端口并清空防火墙
+open_ports() {
+    echo "=== 放通所有端口，清空防火墙规则 ==="
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+    iptables -F
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save
+        echo "防火墙规则已清空并保存。"
+    else
+        echo "未安装 netfilter-persistent，跳过保存规则。"
+    fi
+}
 
 # 检测端口占用
 check_port() {
