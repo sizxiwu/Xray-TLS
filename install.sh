@@ -82,7 +82,7 @@ install_acme_sh() {
     # 如果在中国大陆使用国内镜像
     COUNTRY=$(curl -fsS --max-time 8 https://ipinfo.io/country 2>/dev/null || true)
     COUNTRY=$(echo -n "$COUNTRY" | tr -d '\r\n' | tr '[:lower:]' '[:upper:]')
-    [ "$COUNTRY" = "CN" ] && MIRROR_PREFIX="https://gh.llkk.cc/https://"
+    [ "$COUNTRY" = "CN" ] && MIRROR_PREFIX="https://gh.llkk.cc/"
 
     # 删除旧目录（防止冲突）
     if [ -d "$ACME_DIR" ]; then
